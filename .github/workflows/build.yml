@@ -22,13 +22,11 @@ jobs:
         with:
           channel: stable
 
-      # --- NEW: Install Android NDK 27 (required by google_mobile_ads & webview packages) ---
+      # (Optional) Make sure the NDK 27 is present in the runner
       - name: Install Android NDK 27
-        shell: bash
         run: |
-          SDKBIN="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          echo "y" | "$SDKBIN" "ndk;27.0.12077973"
-          ls -la "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk" || true
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "ndk;27.0.12077973"
 
       - name: Create Flutter project
         run: flutter create clearpix_ai
@@ -37,21 +35,21 @@ jobs:
         working-directory: clearpix_ai
         run: flutter pub add google_mobile_ads
 
-      # --- NEW: Force the app to use NDK 27 ---
+      # Force NDK version inside android/app/build.gradle AFTER the project exists
       - name: Force NDK version in build.gradle
         working-directory: clearpix_ai
-        shell: bash
         run: |
           APP_GRADLE=android/app/build.gradle
-          if grep -q 'ndkVersion' "$APP_GRADLE"; then
-            sed -i 's/ndkVersion[[:space:]]*".*"/ndkVersion "27.0.12077973"/' "$APP_GRADLE"
+          if [ -f "$APP_GRADLE" ]; then
+            if ! grep -q 'ndkVersion' "$APP_GRADLE"; then
+              sed -i 's/android {/android {\n    ndkVersion "27.0.12077973"/' "$APP_GRADLE"
+            fi
           else
-            sed -i 's/^android[[:space:]]*{$/android {\n    ndkVersion "27.0.12077973"/' "$APP_GRADLE"
+            echo "ERROR: $APP_GRADLE not found" >&2
+            exit 1
           fi
-          echo "Applied ndkVersion to $APP_GRADLE"
-          grep -n 'ndkVersion' "$APP_GRADLE" || true
 
-      # Replace main.dart with a TEST-ads demo that uses explicit test ad unit IDs
+      # Write a small Flutter app that uses TEST ad units
       - name: Write main.dart (TEST ADS)
         working-directory: clearpix_ai
         shell: bash
@@ -60,12 +58,7 @@ jobs:
           import 'package:flutter/material.dart';
           import 'package:google_mobile_ads/google_mobile_ads.dart';
 
-          // Google official TEST ad unit IDs (safe for development)
-          const String kBannerTestId       = 'ca-app-pub-3940256099942544/6300978111';
-          const String kInterstitialTestId = 'ca-app-pub-3940256099942544/1033173712';
-          const String kRewardedTestId     = 'ca-app-pub-3940256099942544/5224354917';
-
-          Future<void> main() async {
+          void main() async {
             WidgetsFlutterBinding.ensureInitialized();
             await MobileAds.instance.initialize();
             runApp(const MyApp());
@@ -99,26 +92,22 @@ jobs:
             void initState() {
               super.initState();
               _loadBanner();
-              _preloadInterstitial();
-              _preloadRewarded();
+              _loadInterstitial();
+              _loadRewarded();
             }
 
             void _loadBanner() {
-              final ad = BannerAd(
+              _banner = BannerAd(
                 size: AdSize.banner,
-                adUnitId: kBannerTestId,
+                adUnitId: BannerAd.testAdUnitId,
                 request: const AdRequest(),
-                listener: BannerAdListener(
-                  onAdLoaded: (_) => setState(() {}),
-                  onAdFailedToLoad: (ad, error) { ad.dispose(); debugPrint('Banner failed: $error'); },
-                ),
+                listener: BannerAdListener(onAdLoaded: (_) => setState(() {})),
               )..load();
-              _banner = ad;
             }
 
-            void _preloadInterstitial() {
+            void _loadInterstitial() {
               InterstitialAd.load(
-                adUnitId: kInterstitialTestId,
+                adUnitId: InterstitialAd.testAdUnitId,
                 request: const AdRequest(),
                 adLoadCallback: InterstitialAdLoadCallback(
                   onAdLoaded: (ad) => _interstitial = ad,
@@ -131,16 +120,16 @@ jobs:
               final ad = _interstitial;
               if (ad == null) return;
               ad.fullScreenContentCallback = FullScreenContentCallback(
-                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _preloadInterstitial(); },
-                onAdFailedToShowFullScreenContent: (ad, e) { ad.dispose(); _preloadInterstitial(); },
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadInterstitial(); },
+                onAdFailedToShowFullScreenContent: (ad, _) { ad.dispose(); _loadInterstitial(); },
               );
               ad.show();
               _interstitial = null;
             }
 
-            void _preloadRewarded() {
+            void _loadRewarded() {
               RewardedAd.load(
-                adUnitId: kRewardedTestId,
+                adUnitId: RewardedAd.testAdUnitId,
                 request: const AdRequest(),
                 rewardedAdLoadCallback: RewardedAdLoadCallback(
                   onAdLoaded: (ad) => _rewarded = ad,
@@ -151,10 +140,10 @@ jobs:
 
             Future<void> _showRewarded() async {
               final ad = _rewarded;
-              if (ad == null) { _preloadRewarded(); return; }
+              if (ad == null) { _loadRewarded(); return; }
               ad.fullScreenContentCallback = FullScreenContentCallback(
-                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _preloadRewarded(); },
-                onAdFailedToShowFullScreenContent: (ad, e) { ad.dispose(); _preloadRewarded(); },
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadRewarded(); },
+                onAdFailedToShowFullScreenContent: (ad, _) { ad.dispose(); _loadRewarded(); },
               );
               await ad.show(onUserEarnedReward: (_, __) {});
               _rewarded = null;
@@ -175,12 +164,8 @@ jobs:
                 body: Column(
                   children: [
                     const Expanded(
-                      child: Center(
-                        child: Text(
-                          'Demo app using Google TEST ads.\nReplace IDs with your real ones only for release.',
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
+                      child: Center(child: Text('Demo app using Google TEST ads.\nReplace with real IDs to go live.',
+                        textAlign: TextAlign.center)),
                     ),
                     if (_banner != null)
                       SizedBox(
@@ -195,7 +180,7 @@ jobs:
                   children: [
                     FloatingActionButton.extended(
                       onPressed: _showInterstitial,
-                      icon: const Icon(Icons.play_circle),
+                      icon: const Icon(Icons.smart_display),
                       label: const Text('Interstitial'),
                     ),
                     FloatingActionButton.extended(
@@ -210,16 +195,16 @@ jobs:
           }
           DART
 
+      # Add INTERNET permission + TEST AdMob App ID meta-data
       - name: Patch AndroidManifest (TEST App ID + Internet)
         working-directory: clearpix_ai
-        shell: bash
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          # INTERNET permission
+          # INTERNET permission (if missing)
           if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
             sed -i 's|<manifest|<manifest>\n    <uses-permission android:name="android.permission.INTERNET" />|' "$MANIFEST"
           fi
-          # Google TEST app ID meta-data
+          # TEST AdMob App ID meta-data (if missing)
           if ! grep -q 'com.google.android.gms.ads.APPLICATION_ID' "$MANIFEST"; then
             sed -i 's|<application|<application>\n        <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713" />|' "$MANIFEST"
           fi
