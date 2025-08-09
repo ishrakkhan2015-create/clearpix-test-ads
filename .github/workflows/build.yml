@@ -1,0 +1,209 @@
+name: Build ClearPix APK (Test Ads)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (repo can be empty)
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Flutter project
+        run: flutter create clearpix_ai
+
+      - name: Add AdMob plugin
+        working-directory: clearpix_ai
+        run: flutter pub add google_mobile_ads
+
+      - name: Write main.dart (TEST ADS)
+        working-directory: clearpix_ai
+        shell: bash
+        run: |
+          cat > lib/main.dart <<'DART'
+          import 'package:flutter/material.dart';
+          import 'package:google_mobile_ads/google_mobile_ads.dart';
+
+          void main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            await MobileAds.instance.initialize();
+            runApp(const MyApp());
+          }
+
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                title: 'ClearPix (Test Ads)',
+                theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+                home: const HomePage(),
+              );
+            }
+          }
+
+          class HomePage extends StatefulWidget {
+            const HomePage({super.key});
+            @override
+            State<HomePage> createState() => _HomePageState();
+          }
+
+          class _HomePageState extends State<HomePage> {
+            BannerAd? _banner;
+            InterstitialAd? _interstitial;
+            RewardedAd? _rewarded;
+
+            @override
+            void initState() {
+              super.initState();
+              _loadBanner();
+              _loadInterstitial();
+              _loadRewarded();
+            }
+
+            void _loadBanner() {
+              _banner = BannerAd(
+                size: AdSize.banner,
+                adUnitId: BannerAd.testAdUnitId,  // TEST ID
+                request: const AdRequest(),
+                listener: BannerAdListener(
+                  onAdLoaded: (_) => setState(() {}),
+                  onAdFailedToLoad: (ad, error) { ad.dispose(); },
+                ),
+              )..load();
+            }
+
+            void _loadInterstitial() {
+              InterstitialAd.load(
+                adUnitId: InterstitialAd.testAdUnitId, // TEST ID
+                request: const AdRequest(),
+                adLoadCallback: InterstitialAdLoadCallback(
+                  onAdLoaded: (ad) => _interstitial = ad,
+                  onAdFailedToLoad: (_) => _interstitial = null,
+                ),
+              );
+            }
+
+            void _showInterstitial() {
+              final ad = _interstitial;
+              if (ad == null) return;
+              ad.fullScreenContentCallback = FullScreenContentCallback(
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadInterstitial(); },
+                onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _loadInterstitial(); },
+              );
+              ad.show();
+              _interstitial = null;
+            }
+
+            void _loadRewarded() {
+              RewardedAd.load(
+                adUnitId: RewardedAd.testAdUnitId, // TEST ID
+                request: const AdRequest(),
+                rewardedAdLoadCallback: RewardedAdLoadCallback(
+                  onAdLoaded: (ad) => _rewarded = ad,
+                  onAdFailedToLoad: (_) => _rewarded = null,
+                ),
+              );
+            }
+
+            Future<void> _showRewarded() async {
+              final ad = _rewarded;
+              if (ad == null) return;
+              ad.fullScreenContentCallback = FullScreenContentCallback(
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadRewarded(); },
+                onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _loadRewarded(); },
+              );
+              await ad.show(onUserEarnedReward: (_, __) {});
+              _rewarded = null;
+            }
+
+            @override
+            void dispose() {
+              _banner?.dispose();
+              _interstitial?.dispose();
+              _rewarded?.dispose();
+              super.dispose();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('ClearPix (Test Ads)')),
+                body: Column(
+                  children: [
+                    const Expanded(
+                      child: Center(
+                        child: Text(
+                          'Demo app using Google TEST ads.\nReplace with real IDs only when publishing.',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                    if (_banner != null)
+                      SizedBox(
+                        width: _banner!.size.width.toDouble(),
+                        height: _banner!.size.height.toDouble(),
+                        child: AdWidget(ad: _banner!),
+                      ),
+                  ],
+                ),
+                floatingActionButton: Wrap(
+                  spacing: 12,
+                  children: [
+                    FloatingActionButton.extended(
+                      onPressed: _showInterstitial,
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Interstitial'),
+                    ),
+                    FloatingActionButton.extended(
+                      onPressed: _showRewarded,
+                      icon: const Icon(Icons.card_giftcard),
+                      label: const Text('Rewarded'),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          DART
+
+      - name: Patch AndroidManifest (TEST App ID + Internet)
+        working-directory: clearpix_ai
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # Internet permission (if missing)
+          if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
+            sed -i 's|<manifest|<manifest>\n    <uses-permission android:name="android.permission.INTERNET" />|' "$MANIFEST"
+          fi
+          # Google TEST AdMob App ID inside <application>
+          if ! grep -q 'com.google.android.gms.ads.APPLICATION_ID' "$MANIFEST"; then
+            sed -i 's|<application|<application>\n        <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713" />|' "$MANIFEST"
+          fi
+
+      - name: flutter pub get
+        working-directory: clearpix_ai
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: clearpix_ai
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearpix-test-apk
+          path: clearpix_ai/build/app/outputs/flutter-apk/app-release.apk
