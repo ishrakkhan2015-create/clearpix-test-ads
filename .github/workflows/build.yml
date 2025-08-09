@@ -22,6 +22,14 @@ jobs:
         with:
           channel: stable
 
+      # --- NEW: Install Android NDK 27 (required by google_mobile_ads & webview packages) ---
+      - name: Install Android NDK 27
+        shell: bash
+        run: |
+          SDKBIN="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          echo "y" | "$SDKBIN" "ndk;27.0.12077973"
+          ls -la "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk" || true
+
       - name: Create Flutter project
         run: flutter create clearpix_ai
 
@@ -29,6 +37,21 @@ jobs:
         working-directory: clearpix_ai
         run: flutter pub add google_mobile_ads
 
+      # --- NEW: Force the app to use NDK 27 ---
+      - name: Force NDK version in build.gradle
+        working-directory: clearpix_ai
+        shell: bash
+        run: |
+          APP_GRADLE=android/app/build.gradle
+          if grep -q 'ndkVersion' "$APP_GRADLE"; then
+            sed -i 's/ndkVersion[[:space:]]*".*"/ndkVersion "27.0.12077973"/' "$APP_GRADLE"
+          else
+            sed -i 's/^android[[:space:]]*{$/android {\n    ndkVersion "27.0.12077973"/' "$APP_GRADLE"
+          fi
+          echo "Applied ndkVersion to $APP_GRADLE"
+          grep -n 'ndkVersion' "$APP_GRADLE" || true
+
+      # Replace main.dart with a TEST-ads demo that uses explicit test ad unit IDs
       - name: Write main.dart (TEST ADS)
         working-directory: clearpix_ai
         shell: bash
@@ -37,7 +60,12 @@ jobs:
           import 'package:flutter/material.dart';
           import 'package:google_mobile_ads/google_mobile_ads.dart';
 
-          void main() async {
+          // Google official TEST ad unit IDs (safe for development)
+          const String kBannerTestId       = 'ca-app-pub-3940256099942544/6300978111';
+          const String kInterstitialTestId = 'ca-app-pub-3940256099942544/1033173712';
+          const String kRewardedTestId     = 'ca-app-pub-3940256099942544/5224354917';
+
+          Future<void> main() async {
             WidgetsFlutterBinding.ensureInitialized();
             await MobileAds.instance.initialize();
             runApp(const MyApp());
@@ -71,25 +99,26 @@ jobs:
             void initState() {
               super.initState();
               _loadBanner();
-              _loadInterstitial();
-              _loadRewarded();
+              _preloadInterstitial();
+              _preloadRewarded();
             }
 
             void _loadBanner() {
-              _banner = BannerAd(
+              final ad = BannerAd(
                 size: AdSize.banner,
-                adUnitId: BannerAd.testAdUnitId,  // TEST ID
+                adUnitId: kBannerTestId,
                 request: const AdRequest(),
                 listener: BannerAdListener(
                   onAdLoaded: (_) => setState(() {}),
-                  onAdFailedToLoad: (ad, error) { ad.dispose(); },
+                  onAdFailedToLoad: (ad, error) { ad.dispose(); debugPrint('Banner failed: $error'); },
                 ),
               )..load();
+              _banner = ad;
             }
 
-            void _loadInterstitial() {
+            void _preloadInterstitial() {
               InterstitialAd.load(
-                adUnitId: InterstitialAd.testAdUnitId, // TEST ID
+                adUnitId: kInterstitialTestId,
                 request: const AdRequest(),
                 adLoadCallback: InterstitialAdLoadCallback(
                   onAdLoaded: (ad) => _interstitial = ad,
@@ -102,16 +131,16 @@ jobs:
               final ad = _interstitial;
               if (ad == null) return;
               ad.fullScreenContentCallback = FullScreenContentCallback(
-                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadInterstitial(); },
-                onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _loadInterstitial(); },
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _preloadInterstitial(); },
+                onAdFailedToShowFullScreenContent: (ad, e) { ad.dispose(); _preloadInterstitial(); },
               );
               ad.show();
               _interstitial = null;
             }
 
-            void _loadRewarded() {
+            void _preloadRewarded() {
               RewardedAd.load(
-                adUnitId: RewardedAd.testAdUnitId, // TEST ID
+                adUnitId: kRewardedTestId,
                 request: const AdRequest(),
                 rewardedAdLoadCallback: RewardedAdLoadCallback(
                   onAdLoaded: (ad) => _rewarded = ad,
@@ -122,10 +151,10 @@ jobs:
 
             Future<void> _showRewarded() async {
               final ad = _rewarded;
-              if (ad == null) return;
+              if (ad == null) { _preloadRewarded(); return; }
               ad.fullScreenContentCallback = FullScreenContentCallback(
-                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _loadRewarded(); },
-                onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _loadRewarded(); },
+                onAdDismissedFullScreenContent: (ad) { ad.dispose(); _preloadRewarded(); },
+                onAdFailedToShowFullScreenContent: (ad, e) { ad.dispose(); _preloadRewarded(); },
               );
               await ad.show(onUserEarnedReward: (_, __) {});
               _rewarded = null;
@@ -148,7 +177,7 @@ jobs:
                     const Expanded(
                       child: Center(
                         child: Text(
-                          'Demo app using Google TEST ads.\nReplace with real IDs only when publishing.',
+                          'Demo app using Google TEST ads.\nReplace IDs with your real ones only for release.',
                           textAlign: TextAlign.center,
                         ),
                       ),
@@ -166,7 +195,7 @@ jobs:
                   children: [
                     FloatingActionButton.extended(
                       onPressed: _showInterstitial,
-                      icon: const Icon(Icons.play_arrow),
+                      icon: const Icon(Icons.play_circle),
                       label: const Text('Interstitial'),
                     ),
                     FloatingActionButton.extended(
@@ -183,13 +212,14 @@ jobs:
 
       - name: Patch AndroidManifest (TEST App ID + Internet)
         working-directory: clearpix_ai
+        shell: bash
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          # Internet permission (if missing)
+          # INTERNET permission
           if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
             sed -i 's|<manifest|<manifest>\n    <uses-permission android:name="android.permission.INTERNET" />|' "$MANIFEST"
           fi
-          # Google TEST AdMob App ID inside <application>
+          # Google TEST app ID meta-data
           if ! grep -q 'com.google.android.gms.ads.APPLICATION_ID' "$MANIFEST"; then
             sed -i 's|<application|<application>\n        <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713" />|' "$MANIFEST"
           fi
